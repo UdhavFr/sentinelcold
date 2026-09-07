@@ -1,0 +1,1 @@
+# SentinelCold — Utility modules

@@ -1,0 +1,244 @@
+# ============================================================================
+# SentinelCold — Central Configuration
+# All hyperparameters, thresholds, and paths in one place.
+# ============================================================================
+
+# --- Paths -------------------------------------------------------------------
+paths:
+  raw_data: "data/raw/cold_chain_shipment_data.csv"
+  output_dir: "outputs"
+  figures_dir: "outputs/figures"
+  tables_dir: "outputs/tables"
+  models_dir: "outputs/models"
+  reports_dir: "outputs/reports"
+  experiments_dir: "outputs/experiments"
+
+# --- Reproducibility ---------------------------------------------------------
+seed: 42
+
+# --- Tier 1: Ingestion & Data Profiling --------------------------------------
+tier1:
+  missingness_threshold: 0.05          # Flag columns exceeding 5 % missing
+  target_column: "silent_failure"
+  id_column: "shipment_id"
+  expected_positive_prevalence: 0.1968 # 19.68 %
+  prevalence_drift_tolerance: 0.05     # ±5 pp
+
+# --- Tier 2: Preprocessing & Cleaning ----------------------------------------
+tier2:
+  imputation:
+    strategies: ["class_conditional_median", "global_median", "knn", "mice", "missforest"]
+    default: "class_conditional_median"
+    knn_neighbors: 5
+    mice_max_iter: 10
+    columns_to_impute: ["rh_max", "temp_recovery_rate"]
+    # Features used by KNN fallback imputer at inference time
+    knn_fallback_features:
+      rh_max: ["rh_mean", "rh_std", "temp_mean_c"]
+      temp_recovery_rate: ["temp_mean_c", "temp_std_c", "transit_days"]
+
+  outlier:
+    iqr_multiplier: 1.5
+    mode: "tree"   # "tree" = passthrough, "linear" = winsorize
+
+  balancing:
+    strategies: ["smote", "adasyn", "class_weight", "smote_tomek"]
+    default: "smote"
+    target_ratios: [0.5, 1.0]   # minority / majority → 1:2 and 1:1
+    default_target_ratio: 0.5   # 1:2 minority:majority
+    smote_k_neighbors: 5
+    ks_test_alpha: 0.05         # Synthetic sample quality gate
+
+# --- Tier 3: Feature Engineering ---------------------------------------------
+tier3:
+  feature_sets: ["FS-A", "FS-B", "FS-C", "FS-D", "FS-E", "FS-F"]
+  default_feature_set: "FS-B"
+
+  excursion_intensity:
+    temp_range_weight: 0.4
+    sensor_gap_weight: 0.6
+
+  collinearity:
+    vif_threshold: 10.0
+    # Applied only to linear / distance-based models, not tree ensembles
+
+  categorical_features: ["carrier_id", "origin_zone", "dest_zone", "package_type", "leg_count", "feature_x3"]
+
+# --- Tier 4: Modeling --------------------------------------------------------
+tier4:
+  cv:
+    n_splits: 5
+    stratify: true
+
+  models:
+    xgboost:
+      default:
+        n_estimators: 300
+        max_depth: 6
+        learning_rate: 0.1
+        subsample: 0.8
+        colsample_bytree: 0.8
+        scale_pos_weight: 4.08     # ~6426/1574
+        eval_metric: "logloss"
+        use_label_encoder: false
+        random_state: 42
+      tuning:
+        n_trials: 30
+        search_space:
+          max_depth: [3, 10]
+          learning_rate: [0.01, 0.3]
+          n_estimators: [100, 1000]
+          subsample: [0.6, 1.0]
+          colsample_bytree: [0.6, 1.0]
+          min_child_weight: [1, 10]
+          gamma: [0.0, 5.0]
+          reg_alpha: [0.0, 10.0]
+          reg_lambda: [0.0, 10.0]
+
+    lightgbm:
+      default:
+        n_estimators: 300
+        num_leaves: 31
+        learning_rate: 0.1
+        subsample: 0.8
+        colsample_bytree: 0.8
+        class_weight: "balanced"
+        random_state: 42
+        verbose: -1
+      tuning:
+        n_trials: 30
+        search_space:
+          num_leaves: [15, 63]
+          learning_rate: [0.01, 0.3]
+          n_estimators: [100, 1000]
+          subsample: [0.6, 1.0]
+          colsample_bytree: [0.6, 1.0]
+          min_child_samples: [5, 50]
+          reg_alpha: [0.0, 10.0]
+          reg_lambda: [0.0, 10.0]
+
+    catboost:
+      default:
+        iterations: 300
+        depth: 6
+        learning_rate: 0.1
+        l2_leaf_reg: 3.0
+        auto_class_weights: "Balanced"
+        random_seed: 42
+        verbose: 0
+      tuning:
+        n_trials: 30
+        search_space:
+          depth: [4, 10]
+          learning_rate: [0.01, 0.3]
+          iterations: [100, 1000]
+          l2_leaf_reg: [1.0, 10.0]
+          bagging_temperature: [0.0, 5.0]
+          random_strength: [0.0, 5.0]
+
+    random_forest:
+      n_estimators: 500
+      max_depth: null
+      class_weight: "balanced_subsample"
+      random_state: 42
+
+    logistic_regression:
+      C: [0.001, 0.01, 0.1, 1.0, 10.0]
+      class_weight: "balanced"
+      max_iter: 1000
+      solver: "lbfgs"
+      random_state: 42
+
+    tabnet:
+      n_d: 8
+      n_a: 8
+      n_steps: 3
+      gamma: 1.3
+      lambda_sparse: 0.001
+      max_epochs: 100
+      patience: 15
+      batch_size: 256
+
+  baselines:
+    knn:
+      k_values: [3, 5, 7, 11, 15, 21, 31]
+    kmeans:
+      n_clusters: 2
+    isolation_forest:
+      n_estimators: [100, 200, 500]
+      contamination: 0.197
+
+  threshold:
+    strategies: ["asymmetric_cost", "f1_max", "youden_j"]
+    default: "asymmetric_cost"
+    asymmetric_cost:
+      cost_tn: 0
+      cost_fp: 1
+      cost_fn: 20
+      cost_tp: 2
+      recall_floor: 0.95
+      theta_range: [0.05, 0.50]
+      theta_step: 0.01
+
+  ensemble:
+    soft_voting_weights: [1, 1, 1]   # equal XGB:LGBM:CB
+    stacking_meta_learner: "logistic_regression"
+
+  autoencoder:
+    variants: ["conv1d", "dense", "vae"]
+    default: "conv1d"
+    epochs: 100
+    batch_size: 64
+    learning_rate: 0.001
+    latent_dim: 16
+    anomaly_percentile: 95     # Threshold at 95th percentile of non-failure recon error
+    conv1d:
+      channels: [16, 32, 64]
+      kernel_size: 3
+      stride: 2
+    dense:
+      hidden_dims: [64, 32, 16]
+    vae:
+      hidden_dims: [64, 32]
+      kl_weight: 0.001
+
+# --- Tier 5: Explainability --------------------------------------------------
+tier5:
+  shap:
+    max_display: 15
+    n_sample_local: 100          # Number of high-risk shipments to explain with local SHAP
+  lime:
+    n_samples: 5000
+    n_features: 10
+    sample_size: 50              # Subset of high-risk predictions for LIME cross-check
+  agreement_threshold: 0.90     # SHAP-LIME top-3 agreement target
+
+# --- Tier 6: Decision Support ------------------------------------------------
+tier6:
+  theta_high_offset: 0.35       # θ_high = θ* + 0.35
+  shap_dominance_threshold: 0.15 # |SHAP| > 0.15 = "dominant" attribution
+
+# --- Experiment Framework ----------------------------------------------------
+experiments:
+  ablation_stages:
+    - name: "imputation"
+      vary: ["class_conditional_median", "global_median", "knn", "mice", "missforest"]
+      fix: { balancing: "class_weight", feature_set: "FS-B", model: "xgb_default", threshold: "asymmetric_cost" }
+    - name: "balancing"
+      vary: ["smote_0.5", "smote_1.0", "adasyn_0.5", "adasyn_1.0", "class_weight", "smote_tomek_0.5"]
+      fix: { feature_set: "FS-B", model: "xgb_default", threshold: "asymmetric_cost" }
+    - name: "features"
+      vary: ["FS-A", "FS-B", "FS-C", "FS-D", "FS-E", "FS-F"]
+      fix: { model: "xgb_default", threshold: "asymmetric_cost" }
+    - name: "models"
+      vary: ["xgb_default", "xgb_tuned", "lgbm_default", "lgbm_tuned",
+             "catboost_default", "catboost_tuned",
+             "ensemble_equal", "ensemble_tuned", "stacking",
+             "random_forest", "logistic_reg", "tabnet"]
+      fix: { threshold: "asymmetric_cost" }
+    - name: "threshold"
+      vary: ["asymmetric_cost", "f1_max", "youden_j"]
+      fix: {}
+    - name: "autoencoder"
+      vary: ["none", "conv1d", "dense", "vae"]
+      fix: {}
